@@ -1,0 +1,171 @@
+# Proxy pod with UDN attachment and dynamic VM IP discovery
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenant-2-proxy-sa
+  namespace: tenant-2-proxy
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vmi-reader
+  namespace: tenant-2
+rules:
+- apiGroups: ["kubevirt.io"]
+  resources: ["virtualmachineinstances"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant-2-proxy-vmi-reader
+  namespace: tenant-2
+subjects:
+- kind: ServiceAccount
+  name: tenant-2-proxy-sa
+  namespace: tenant-2-proxy
+roleRef:
+  kind: Role
+  name: vmi-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tenant-2-proxy
+  namespace: tenant-2-proxy
+  labels:
+    app: tenant-2-proxy
+    purpose: multi-tenancy-demo
+  annotations:
+    k8s.v1.cni.cncf.io/networks: tenant-2-external # attach to UDN
+spec:
+  serviceAccountName: tenant-2-proxy-sa
+  initContainers:
+  - name: get-vm-ip
+    image: bitnami/kubectl:latest
+    command:
+    - /bin/bash
+    - -c
+    - |
+      set -e
+      echo "Waiting for VM tenant-2-worker1 to be ready..."
+      
+      # Wait for VMI to be ready with better error handling
+      MAX_RETRIES=60
+      RETRY_COUNT=0
+      while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        PHASE=$(kubectl get vmi tenant-2-worker1 -n tenant-2 -o jsonpath='{.status.phase}' 2>&1)
+        echo "VMI phase: $PHASE (attempt $((RETRY_COUNT+1))/$MAX_RETRIES)"
+        
+        if echo "$PHASE" | grep -qi "Running"; then
+          echo "✓ VM is running!"
+          break
+        fi
+        
+        RETRY_COUNT=$((RETRY_COUNT+1))
+        if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+          echo "ERROR: Timeout waiting for VM to be running"
+          exit 1
+        fi
+        sleep 5
+      done
+      
+      echo "VM is running, getting eth2 IP address..."
+      
+      # Get the IP address of eth2 (tenant-2-external network)
+      # The interfaces are in status.interfaces array
+      VM_IP=$(kubectl get vmi tenant-2-worker1 -n tenant-2 -o jsonpath='{.status.interfaces[?(@.name=="sec-int2")].ipAddress}')
+      
+      if [ -z "$VM_IP" ]; then
+        echo "ERROR: Could not get VM IP for eth2 interface"
+        echo "Available interfaces:"
+        kubectl get vmi tenant-2-worker1 -n tenant-2 -o jsonpath='{.status.interfaces[*].name}'
+        exit 1
+      fi
+      
+      echo "Found VM IP: $VM_IP"
+      
+      # Create nginx config with the discovered IP
+      cat > /config/nginx.conf <<EOF
+      worker_processes auto;
+      error_log /tmp/error.log;
+      pid /tmp/nginx.pid;
+      
+      events {
+        worker_connections 1024;
+      }
+      
+      http {
+        client_body_temp_path /tmp/client_temp;
+        proxy_temp_path /tmp/proxy_temp;
+        
+        upstream backend {
+          server ${VM_IP}:30011;
+        }
+        
+        server {
+          listen 8080;
+          
+          location / {
+            proxy_pass http://backend;
+
+            # Critical headers for OpenShift router
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            proxy_set_header X-Forwarded-Host \$host;
+            proxy_set_header X-Forwarded-Port \$server_port;
+            
+            # HTTP/1.1 support
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            
+            # Timeouts
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+          }
+        }
+      }
+      EOF
+      
+      echo "✓ Nginx config created with VM IP: ${VM_IP}:30012"
+      cat /config/nginx.conf
+    volumeMounts:
+    - name: config
+      mountPath: /config
+  containers:
+  - name: nginx-proxy
+    image: quay.io/braulio/nginx-unprivileged:latest
+    ports:
+    - containerPort: 8080
+    volumeMounts:
+    - name: config
+      mountPath: /etc/nginx/nginx.conf
+      subPath: nginx.conf
+  volumes:
+  - name: config
+    emptyDir: {}
+---
+#Service + Route pointing to proxy
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenant-2-proxy-svc
+  namespace: tenant-2-proxy
+  labels:
+    purpose: multi-tenancy-demo
+    user: tenant-2
+spec:
+  selector:
+    app: tenant-2-proxy
+    purpose: multi-tenancy-demo
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 8080
+  type: LoadBalancer
+---

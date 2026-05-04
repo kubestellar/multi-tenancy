@@ -1,0 +1,75 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-2
+  labels:
+    k8s.ovn.org/primary-user-defined-network: ""
+    purpose: multi-tenancy-demo
+    user: tenant-2
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-2-proxy
+  labels:
+    purpose: multi-tenancy-demo
+    user: tenant-2
+---
+apiVersion: k8s.ovn.org/v1
+kind: UserDefinedNetwork
+metadata:
+  name: tenant-2-dp
+  namespace: tenant-2
+  labels:
+    purpose: multi-tenancy-demo
+    user: tenant-2
+spec:
+  topology: Layer3
+  layer3:
+    role: Primary
+    subnets:
+      - cidr: "10.103.0.0/16"
+---
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: tenant-2-cp
+  labels:
+    purpose: multi-tenancy-demo
+    user: tenant-2
+spec:
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: In
+      values: ["tenant-2", "tenant-2-cp-system"]
+  network:
+    topology: Layer2
+    layer2:
+      role: Secondary
+      subnets:
+       - "106.106.0.0/16"
+---
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: tenant-2-external
+  labels:
+    purpose: multi-tenancy-demo
+    user: tenant-2
+spec:
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: In
+      values: ["tenant-2", "tenant-2-proxy"]
+  network:
+    topology: Layer2
+    layer2:
+      role: Secondary
+      subnets:
+       - "107.107.0.0/16"
+
+
+

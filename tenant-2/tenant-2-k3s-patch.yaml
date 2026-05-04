@@ -1,0 +1,46 @@
+spec:
+  template:
+    metadata:
+      annotations:
+        k8s.v1.cni.cncf.io/networks: tenant-2-cp
+    spec:
+      containers:
+      - name: k3s-server
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          
+          # Wait for interfaces to be ready
+          echo "Waiting for network interfaces..."
+          sleep 10
+          
+          # Show all interfaces for debugging
+          echo "Available interfaces:"
+          ip addr show
+          
+          # Extract IPs using BusyBox-compatible commands
+          POD_IP=$(ip -4 addr show eth0 | awk '/inet/ {print $2}' | cut -d/ -f1 | head -n1)
+          UDN_IP=$(ip -4 addr show net1 | awk '/inet/ {print $2}' | cut -d/ -f1 | head -n1)
+          
+          echo "Detected Pod IP: ${POD_IP}"
+          echo "Detected UDN IP: ${UDN_IP}"
+          
+          # Validate
+          if [ -z "$POD_IP" ] || [ -z "$UDN_IP" ]; then
+            echo "ERROR: Failed to detect IPs"
+            exit 1
+          fi
+          
+          # Start K3s
+          exec k3s server \
+            --advertise-address=${UDN_IP} \
+            --node-ip=${UDN_IP} \
+            --node-external-ip=${UDN_IP} \
+            --tls-san=${UDN_IP} \
+            --tls-san=${POD_IP} \
+            --tls-san=k3s-cp.localtest.me \
+            --flannel-iface=net1 \
+            --data-dir=/var/lib/rancher/k3s \
+            --snapshotter=native

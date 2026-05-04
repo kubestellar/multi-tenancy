@@ -1,0 +1,58 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: tenant-1-worker1
+  labels:
+    purpose: multi-tenancy-demo
+    user: tenant-1
+    role: worker
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: tenant-1-worker1
+        purpose: multi-tenancy-demo
+        user: tenant-1
+      annotations:
+        k8s.v1.cni.cncf.io/networks: tenant-1-cp,tenant-1-external
+    spec:
+      domain:
+        cpu:
+          cores: 2
+        devices:
+          disks:
+          - name: containerdisk
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: prim-int
+            bridge: {}
+          - name: sec-int1
+            bridge: {} # Secondary network often uses bridge
+          - name: sec-int2
+            bridge: {}
+        resources:
+          requests:
+            memory: 4Gi
+      networks:
+        - name: prim-int
+          pod: {}
+        - name: sec-int1
+          multus:
+            networkName: tenant-1-cp # References the NAD for secondary network
+        - name: sec-int2
+          multus:
+            networkName: tenant-1-external
+      volumes:
+      - name: containerdisk
+        containerDisk:
+          image: quay.io/containerdisks/fedora:40
+          imagePullPolicy: IfNotPresent
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          secretRef:
+            name: tenant-1-workers-userdata
